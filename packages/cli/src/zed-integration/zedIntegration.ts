@@ -4,15 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  Config,
-  GeminiChat,
-  ToolResult,
-  ToolCallConfirmationDetails,
-  FilterFilesOptions,
-  ConversationRecord,
-} from '@google/gemini-cli-core';
 import {
+  type Config,
+  type GeminiChat,
+  type ToolResult,
+  type ToolCallConfirmationDetails,
+  type FilterFilesOptions,
+  type ConversationRecord,
   CoreToolCallStatus,
   AuthType,
   logToolCall,
@@ -39,6 +37,7 @@ import {
   ApprovalMode,
   getVersion,
   convertSessionToClientHistory,
+  type SessionMetrics,
 } from '@google/gemini-cli-core';
 import * as acp from '@agentclientprotocol/sdk';
 import { AcpFileSystemService } from './fileSystemService.js';
@@ -61,11 +60,21 @@ import { loadCliConfig } from '../config/config.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { SessionSelector } from '../utils/sessionUtils.js';
 
+import { memoryCommand } from '../ui/commands/memoryCommand.js';
+import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
+import { restoreCommand } from '../ui/commands/restoreCommand.js';
+import { parseSlashCommand } from '../utils/commands.js';
+import { initCommand } from '../ui/commands/initCommand.js';
+import type { SlashCommand, CommandContext } from '../ui/commands/types.js';
+import type { HistoryItemWithoutId } from '../ui/types.js';
+import type { SessionStatsState } from '../ui/contexts/SessionContext.js';
 export async function runZedIntegration(
   config: Config,
   settings: LoadedSettings,
   argv: CliArgs,
 ) {
+  // ... (skip unchanged lines) ...
+
   const { stdout: workingStdout } = createWorkingStdio();
   const stdout = Writable.toWeb(workingStdout) as WritableStream;
   // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
@@ -240,8 +249,19 @@ export class GeminiAgent {
 
     const geminiClient = config.getGeminiClient();
     const chat = await geminiClient.startChat();
-    const session = new Session(sessionId, chat, config, this.connection);
+    const session = new Session(
+      sessionId,
+      chat,
+      config,
+      this.connection,
+      this.settings,
+    );
     this.sessions.set(sessionId, session);
+
+    setTimeout(() => {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      session.sendAvailableCommands();
+    }, 0);
 
     return {
       sessionId,
@@ -291,12 +311,18 @@ export class GeminiAgent {
       geminiClient.getChat(),
       config,
       this.connection,
+      this.settings,
     );
     this.sessions.set(sessionId, session);
 
     // Stream history back to client
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     session.streamHistory(sessionData.messages);
+
+    setTimeout(() => {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      session.sendAvailableCommands();
+    }, 0);
 
     return {
       modes: {
@@ -424,6 +450,7 @@ export class Session {
     private readonly chat: GeminiChat,
     private readonly config: Config,
     private readonly connection: acp.AgentSideConnection,
+    private readonly settings: LoadedSettings,
   ) {}
 
   async cancelPendingPrompt(): Promise<void> {
@@ -444,6 +471,31 @@ export class Session {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
     this.config.setApprovalMode(mode.id as ApprovalMode);
     return {};
+  }
+
+  async sendAvailableCommands(): Promise<void> {
+    await this.sendUpdate({
+      sessionUpdate: 'available_commands_update',
+      availableCommands: [
+        {
+          name: 'memory',
+          description: 'Commands for interacting with memory',
+        },
+        {
+          name: 'extensions',
+          description: 'Manage extensions',
+        },
+        {
+          name: 'restore',
+          description: 'Restore a tool call',
+        },
+        {
+          name: 'init',
+          description:
+            'Analyzes the project and creates a tailored GEMINI.md file',
+        },
+      ],
+    });
   }
 
   async streamHistory(messages: ConversationRecord['messages']): Promise<void> {
@@ -525,6 +577,41 @@ export class Session {
     const chat = this.chat;
 
     const parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
+
+    // Command interception
+    let commandText = '';
+
+    for (const part of parts) {
+      if (typeof part === 'object' && part !== null) {
+        if ('text' in part) {
+          // It is a text part
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-type-assertion
+          const text = (part as any).text;
+          if (typeof text === 'string') {
+            commandText += text;
+          }
+        } else {
+          // Non-text part (image, embedded resource)
+          // Stop looking for command
+          break;
+        }
+      }
+    }
+
+    commandText = commandText.trim();
+
+    if (
+      commandText &&
+      (commandText.startsWith('/') || commandText.startsWith('$'))
+    ) {
+      // If we found a command, pass it to handleCommand
+      // Note: handleCommand currently expects `commandText` to be the command string
+      // It uses `parts` argument but effectively ignores it in current implementation
+      const handled = await this.handleCommand(commandText, parts);
+      if (handled) {
+        return { stopReason: 'end_turn' };
+      }
+    }
 
     let nextMessage: Content | null = { role: 'user', parts };
 
@@ -625,9 +712,99 @@ export class Session {
     return { stopReason: 'end_turn' };
   }
 
-  private async sendUpdate(
-    update: acp.SessionNotification['update'],
+  private async handleCommand(
+    commandText: string,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    parts: Part[],
+  ): Promise<boolean> {
+    const commands: SlashCommand[] = [
+      memoryCommand,
+      extensionsCommand(),
+      initCommand,
+    ];
+
+    const restore = restoreCommand(this.config);
+    if (restore) {
+      commands.push(restore);
+    }
+
+    const { commandToExecute, args } = parseSlashCommand(commandText, commands);
+
+    if (commandToExecute) {
+      await this.runCommand(commandToExecute, commandText, args);
+      return true;
+    }
+
+    return false;
+  }
+
+  private async runCommand(
+    command: SlashCommand,
+    commandText: string,
+    rawArgs: string,
   ): Promise<void> {
+    // Mock UI for capturing output
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    const mockUi = {
+      addItem: (item: HistoryItemWithoutId) => {
+        if (item.text) {
+          // eslint-disable-next-line @typescript-eslint/no-floating-promises
+          this.sendUpdate({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: item.text },
+          });
+        }
+      },
+      dispatchExtensionStateUpdate: () => {},
+      setPendingItem: () => {},
+      reloadCommands: () => {},
+      removeComponent: () => {},
+      loadHistory: () => {},
+    } as unknown as CommandContext['ui'];
+
+    const gitService = await this.config.getGitService();
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    const context: CommandContext = {
+      ui: mockUi,
+      invocation: {
+        raw: commandText,
+        name: command.name,
+        args: rawArgs,
+      },
+      services: {
+        config: this.config,
+        settings: this.settings,
+        git: gitService,
+        logger: debugLogger,
+      },
+      session: {
+        stats: {
+          sessionId: this.id,
+          sessionStartTime: new Date(),
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+          metrics: {} as unknown as SessionMetrics,
+          lastPromptTokenCount: 0,
+          promptCount: 0,
+        } as SessionStatsState,
+        sessionShellAllowlist: new Set(),
+      },
+    } as unknown as CommandContext;
+
+    if (command.action) {
+      try {
+        await command.action(context, rawArgs);
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        await this.sendUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `Error: ${errorMessage}` },
+        });
+      }
+    }
+  }
+
+  private async sendUpdate(update: acp.SessionUpdate): Promise<void> {
     const params: acp.SessionNotification = {
       sessionId: this.id,
       update,
