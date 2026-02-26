@@ -439,6 +439,45 @@ auth:
       });
     });
 
+    it('should parse remote agent with custom http scheme (e.g. Digest)', async () => {
+      const filePath = await writeAgentMarkdown(`---
+kind: remote
+name: digest-agent
+agent_card_url: https://example.com/card
+auth:
+  type: http
+  scheme: Digest
+  value: user="admin", nonce="123"
+---
+`);
+      const result = await parseAgentMarkdown(filePath);
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        kind: 'remote',
+        name: 'digest-agent',
+        auth: {
+          type: 'http',
+          scheme: 'Digest',
+          value: 'user="admin", nonce="123"',
+        },
+      });
+    });
+
+    it('should throw error for custom http scheme without value', async () => {
+      const filePath = await writeAgentMarkdown(`---
+kind: remote
+name: invalid-digest
+agent_card_url: https://example.com/card
+auth:
+  type: http
+  scheme: Digest
+---
+`);
+      await expect(parseAgentMarkdown(filePath)).rejects.toThrow(
+        /Custom HTTP scheme "Digest" requires "value"/,
+      );
+    });
+
     it('should throw error for Bearer auth without token', async () => {
       const filePath = await writeAgentMarkdown(`---
 kind: remote

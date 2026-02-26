@@ -55,8 +55,21 @@ const coderAgentCard: AgentCard = {
     pushNotifications: false,
     stateTransitionHistory: true,
   },
-  securitySchemes: undefined,
-  security: undefined,
+  securitySchemes: {
+    bearerAuth: {
+      type: 'http',
+      scheme: 'bearer',
+    },
+    basicAuth: {
+      type: 'http',
+      scheme: 'basic',
+    },
+    digestAuth: {
+      type: 'http',
+      scheme: 'digest',
+    },
+  },
+  security: [{ bearerAuth: [] }, { basicAuth: [] }, { digestAuth: [] }],
   defaultInputModes: ['text'],
   defaultOutputModes: ['text'],
   skills: [
@@ -202,6 +215,56 @@ export async function createApp() {
     let expressApp = express();
     expressApp.use((req, res, next) => {
       requestStorage.run({ req }, next);
+    });
+
+    // Optional authentication middleware for testing
+    expressApp.use((req, res, next) => {
+      const authHeader = req.headers.authorization;
+      if (authHeader) {
+        logger.info(`[CoreAgent] Incoming Authorization header: ${authHeader}`);
+      }
+
+      // Allow .well-known/agent-card.json to be public
+      if (req.path.includes('.well-known/agent-card.json')) {
+        return next();
+      }
+
+      // 1. Bearer Check
+      const serverToken = process.env['A2A_SERVER_TOKEN'];
+      if (serverToken && authHeader === `Bearer ${serverToken}`) {
+        return next();
+      }
+
+      // 2. Basic Check
+      const basicUser = process.env['A2A_SERVER_BASIC_USER'];
+      const basicPass = process.env['A2A_SERVER_BASIC_PASS'];
+      if (basicUser && basicPass) {
+        const expectedBase64 = Buffer.from(
+          `${basicUser}:${basicPass}`,
+        ).toString('base64');
+        if (authHeader === `Basic ${expectedBase64}`) {
+          return next();
+        }
+      }
+
+      // 3. Generic/Custom Check (e.g. Digest)
+      const genericValue = process.env['A2A_SERVER_GENERIC_VALUE'];
+      if (genericValue && authHeader?.includes(genericValue)) {
+        return next();
+      }
+
+      // If any of the above were set but didn't match, or if nothing was set but we want to log
+      if (serverToken || (basicUser && basicPass) || genericValue) {
+        logger.warn(
+          `[CoreAgent] Unauthorized request to ${req.path}. Got: ${authHeader}`,
+        );
+        return res.status(401).json({
+          error: 'Unauthorized',
+          message: 'Missing or invalid Authorization header',
+        });
+      }
+
+      next();
     });
 
     const appBuilder = new A2AExpressApp(requestHandler);

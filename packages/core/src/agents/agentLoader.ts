@@ -50,10 +50,11 @@ interface FrontmatterAuthConfig {
   key?: string;
   name?: string;
   // HTTP
-  scheme?: 'Bearer' | 'Basic';
+  scheme?: string;
   token?: string;
   username?: string;
   password?: string;
+  value?: string;
 }
 
 interface FrontmatterRemoteAgentDefinition
@@ -139,10 +140,11 @@ const apiKeyAuthSchema = z.object({
 const httpAuthSchema = z.object({
   ...baseAuthFields,
   type: z.literal('http'),
-  scheme: z.enum(['Bearer', 'Basic']),
+  scheme: z.string(),
   token: z.string().min(1).optional(),
   username: z.string().min(1).optional(),
   password: z.string().min(1).optional(),
+  value: z.string().min(1).optional(),
 });
 
 const authConfigSchema = z
@@ -155,8 +157,7 @@ const authConfigSchema = z
           message: 'Bearer scheme requires "token"',
           path: ['token'],
         });
-      }
-      if (data.scheme === 'Basic') {
+      } else if (data.scheme === 'Basic') {
         if (!data.username) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
@@ -171,6 +172,17 @@ const authConfigSchema = z
             path: ['password'],
           });
         }
+      } else if (
+        data.scheme !== 'Bearer' &&
+        data.scheme !== 'Basic' &&
+        !data.value
+      ) {
+        // Generic scheme validation
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Custom HTTP scheme "${data.scheme}" requires "value"`,
+          path: ['value'],
+        });
       }
     }
   });
@@ -375,8 +387,17 @@ function convertFrontmatterAuthToConfig(
             password: frontmatter.password,
           };
         default: {
-          const exhaustive: never = frontmatter.scheme;
-          throw new Error(`Unknown HTTP scheme: ${exhaustive}`);
+          if (!frontmatter.value) {
+            throw new Error(
+              `Internal error: Value for custom HTTP scheme "${frontmatter.scheme}" missing after validation.`,
+            );
+          }
+          return {
+            ...base,
+            type: 'http',
+            scheme: frontmatter.scheme,
+            value: frontmatter.value,
+          };
         }
       }
     }

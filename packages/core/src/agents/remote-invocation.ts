@@ -19,6 +19,7 @@ import type {
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { A2AClientManager } from './a2a-client-manager.js';
 import { extractIdsFromResponse, A2AResultReassembler } from './a2aUtils.js';
+import { A2AAuthProviderFactory } from './auth-provider/factory.js';
 import { GoogleAuth } from 'google-auth-library';
 import type { AuthenticationHandler } from '@a2a-js/sdk/client';
 import { debugLogger } from '../utils/debugLogger.js';
@@ -79,7 +80,6 @@ export class RemoteAgentInvocation extends BaseToolInvocation<
   // TODO: See if we can reuse the singleton from AppContainer or similar, but for now use getInstance directly
   // as per the current pattern in the codebase.
   private readonly clientManager = A2AClientManager.getInstance();
-  private readonly authHandler = new ADCHandler();
 
   constructor(
     private readonly definition: RemoteAgentDefinition,
@@ -130,6 +130,13 @@ export class RemoteAgentInvocation extends BaseToolInvocation<
     // or we rely on ADC.
     const reassembler = new A2AResultReassembler();
     try {
+      const authHandler = this.definition.auth
+        ? await A2AAuthProviderFactory.create({
+            authConfig: this.definition.auth,
+            agentName: this.definition.name,
+          })
+        : new ADCHandler();
+
       const priorState = RemoteAgentInvocation.sessionState.get(
         this.definition.name,
       );
@@ -142,7 +149,7 @@ export class RemoteAgentInvocation extends BaseToolInvocation<
         await this.clientManager.loadAgent(
           this.definition.name,
           this.definition.agentCardUrl,
-          this.authHandler,
+          authHandler,
         );
       }
 

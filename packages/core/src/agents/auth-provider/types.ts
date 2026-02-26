@@ -60,6 +60,12 @@ export type HttpAuthConfig = BaseAuthConfig & {
         /** For Basic. Supports $ENV_VAR, !command, or literal. */
         password: string;
       }
+    | {
+        /** Generic scheme (e.g. Digest). */
+        scheme: Exclude<string, 'Bearer' | 'Basic'>;
+        /** Raw value for other schemes. Supports $ENV_VAR, !command, or literal. */
+        value: string;
+      }
   );
 
 /** Client config corresponding to OAuth2SecurityScheme. */
