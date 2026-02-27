@@ -28,7 +28,20 @@ import { type MessageBus } from '../confirmation-bus/message-bus.js';
 import { coreEvents } from '../utils/events.js';
 import { debugLogger } from '../utils/debugLogger.js';
 import { SHELL_TOOL_NAMES } from '../utils/shell-utils.js';
-import { SHELL_TOOL_NAME } from '../tools/tool-names.js';
+import {
+  SHELL_TOOL_NAME,
+  WRITE_FILE_TOOL_NAME,
+  EDIT_TOOL_NAME,
+  READ_FILE_TOOL_NAME,
+  LS_TOOL_NAME,
+  GLOB_TOOL_NAME,
+  GREP_TOOL_NAME,
+  READ_MANY_FILES_TOOL_NAME,
+  WEB_FETCH_TOOL_NAME,
+  WEB_SEARCH_TOOL_NAME,
+  WRITE_TODOS_TOOL_NAME,
+  GET_INTERNAL_DOCS_TOOL_NAME,
+} from '../tools/tool-names.js';
 import { isNodeError } from '../utils/errors.js';
 
 import { isDirectorySecure } from '../utils/security.js';
@@ -445,6 +458,55 @@ export function createPolicyUpdater(
       }
 
       if (message.persist) {
+        // Validation safeguards for auto-adding to persistent policy
+        if (!toolName || toolName === '*') {
+          coreEvents.emitFeedback(
+            'warning',
+            'Policy for all tools was not auto-saved for safety reasons. You can add it manually to your policy file if desired.',
+          );
+          return;
+        }
+
+        const broadPatterns = ['.*', '^.*$', '^.*', '.*$'];
+        if (
+          message.argsPattern &&
+          broadPatterns.includes(message.argsPattern.trim())
+        ) {
+          coreEvents.emitFeedback(
+            'warning',
+            `Policy for "${toolName}" with all arguments was not auto-saved for safety reasons. You can add it manually to your policy file if desired.`,
+          );
+          return;
+        }
+
+        // Sensitive tools MUST have a specific pattern or prefix to be auto-saved
+        const sensitiveTools = [
+          SHELL_TOOL_NAME,
+          WRITE_FILE_TOOL_NAME,
+          EDIT_TOOL_NAME,
+          READ_FILE_TOOL_NAME,
+          LS_TOOL_NAME,
+          GLOB_TOOL_NAME,
+          GREP_TOOL_NAME,
+          READ_MANY_FILES_TOOL_NAME,
+          WEB_FETCH_TOOL_NAME,
+          WEB_SEARCH_TOOL_NAME,
+          WRITE_TODOS_TOOL_NAME,
+          GET_INTERNAL_DOCS_TOOL_NAME,
+        ];
+        const isMcpTool = toolName.includes('__');
+        if (
+          (sensitiveTools.includes(toolName) || isMcpTool) &&
+          !message.argsPattern &&
+          !message.commandPrefix
+        ) {
+          coreEvents.emitFeedback(
+            'warning',
+            `Broad approval for "${toolName}" was not auto-saved for safety reasons. Approvals for sensitive tools must be specific to be auto-saved.`,
+          );
+          return;
+        }
+
         persistenceQueue = persistenceQueue.then(async () => {
           try {
             const workspacePoliciesDir = storage.getWorkspacePoliciesDir();

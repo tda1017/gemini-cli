@@ -23,8 +23,35 @@ import {
   type PolicyUpdateOptions,
 } from '../tools/tools.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
-import { EDIT_TOOL_NAMES } from '../tools/tool-names.js';
+import {
+  EDIT_TOOL_NAMES,
+  READ_FILE_TOOL_NAME,
+  LS_TOOL_NAME,
+  GLOB_TOOL_NAME,
+  GREP_TOOL_NAME,
+  READ_MANY_FILES_TOOL_NAME,
+  WEB_FETCH_TOOL_NAME,
+  WEB_SEARCH_TOOL_NAME,
+  WRITE_TODOS_TOOL_NAME,
+} from '../tools/tool-names.js';
 import type { ValidatingToolCall } from './types.js';
+
+interface ToolWithParams {
+  params: Record<string, unknown>;
+}
+
+function hasParams(
+  tool: AnyDeclarativeTool,
+): tool is AnyDeclarativeTool & ToolWithParams {
+  const t = tool as unknown;
+  return (
+    typeof t === 'object' &&
+    t !== null &&
+    'params' in t &&
+    typeof (t as { params: unknown }).params === 'object' &&
+    (t as { params: unknown }).params !== null
+  );
+}
 
 /**
  * Helper to format the policy denial error.
@@ -99,7 +126,6 @@ export async function updatePolicy(
   // Mode Transitions (AUTO_EDIT)
   if (isAutoEditTransition(tool, outcome)) {
     deps.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
-    return;
   }
 
   // Specialized Tools (MCP)
@@ -108,6 +134,7 @@ export async function updatePolicy(
       tool,
       outcome,
       confirmationDetails,
+      deps.config,
       deps.messageBus,
     );
     return;
@@ -118,6 +145,7 @@ export async function updatePolicy(
     tool,
     outcome,
     confirmationDetails,
+    deps.config,
     deps.messageBus,
   );
 }
@@ -147,6 +175,7 @@ async function handleStandardPolicyUpdate(
   tool: AnyDeclarativeTool,
   outcome: ToolConfirmationOutcome,
   confirmationDetails: SerializableConfirmationDetails | undefined,
+  config: Config,
   messageBus: MessageBus,
 ): Promise<void> {
   if (
@@ -159,10 +188,78 @@ async function handleStandardPolicyUpdate(
       options.commandPrefix = confirmationDetails.rootCommands;
     }
 
+    if (confirmationDetails?.type === 'edit') {
+      // Generate a specific argsPattern for file edits to prevent broad approvals
+      const escapedPath = confirmationDetails.filePath.replace(
+        /[.*+?^${}()|[\]\\]/g,
+        '\\$&',
+      );
+      options.argsPattern = `.*"file_path":"${escapedPath}".*`;
+    } else if (tool.name === READ_FILE_TOOL_NAME && hasParams(tool)) {
+      const filePath = tool.params['file_path'];
+      if (typeof filePath === 'string') {
+        const escapedPath = filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        options.argsPattern = `.*"file_path":"${escapedPath}".*`;
+      }
+    } else if (tool.name === LS_TOOL_NAME && hasParams(tool)) {
+      const dirPath = tool.params['dir_path'];
+      if (typeof dirPath === 'string') {
+        const escapedPath = dirPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        options.argsPattern = `.*"dir_path":"${escapedPath}".*`;
+      }
+    } else if (
+      (tool.name === GLOB_TOOL_NAME || tool.name === GREP_TOOL_NAME) &&
+      hasParams(tool)
+    ) {
+      const dirPath = tool.params['dir_path'];
+      if (typeof dirPath === 'string') {
+        const escapedPath = dirPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        options.argsPattern = `.*"dir_path":"${escapedPath}".*`;
+      }
+    } else if (tool.name === READ_MANY_FILES_TOOL_NAME && hasParams(tool)) {
+      const include = tool.params['include'];
+      if (Array.isArray(include) && include.length > 0) {
+        // Generate a pattern that matches all provided include patterns.
+        // We escape each pattern and join them with .* to match the JSON array content.
+        const escapedPatterns = include.map((p) =>
+          String(p).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+        );
+        const joinedPattern = escapedPatterns.join('.*');
+        options.argsPattern = `.*"include":\\[.*"${joinedPattern}".*\\].*`;
+      }
+    } else if (tool.name === WEB_FETCH_TOOL_NAME && hasParams(tool)) {
+      const prompt = tool.params['prompt'];
+      if (typeof prompt === 'string') {
+        // Find the first URL-like string in the prompt to scope the policy
+        const urlMatch = prompt.match(/https?:\/\/[^\s]+/);
+        if (urlMatch) {
+          const escapedUrl = urlMatch[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          options.argsPattern = `.*${escapedUrl}.*`;
+        }
+      }
+    } else if (tool.name === WEB_SEARCH_TOOL_NAME && hasParams(tool)) {
+      const q = tool.params['q'];
+      if (typeof q === 'string') {
+        const escapedQ = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        options.argsPattern = `.*"q":"${escapedQ}".*`;
+      }
+    } else if (tool.name === WRITE_TODOS_TOOL_NAME && hasParams(tool)) {
+      const todo = tool.params['todo'];
+      if (typeof todo === 'string') {
+        const escapedTodo = todo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        options.argsPattern = `.*"todo":"${escapedTodo}".*`;
+      }
+    }
+
+    const persist =
+      outcome === ToolConfirmationOutcome.ProceedAlwaysAndSave ||
+      (outcome === ToolConfirmationOutcome.ProceedAlways &&
+        config.getAutoAddPolicy());
+
     await messageBus.publish({
       type: MessageBusType.UPDATE_POLICY,
       toolName: tool.name,
-      persist: outcome === ToolConfirmationOutcome.ProceedAlwaysAndSave,
+      persist,
       ...options,
     });
   }
@@ -179,6 +276,7 @@ async function handleMcpPolicyUpdate(
     SerializableConfirmationDetails,
     { type: 'mcp' }
   >,
+  config: Config,
   messageBus: MessageBus,
 ): Promise<void> {
   const isMcpAlways =
@@ -192,7 +290,10 @@ async function handleMcpPolicyUpdate(
   }
 
   let toolName = tool.name;
-  const persist = outcome === ToolConfirmationOutcome.ProceedAlwaysAndSave;
+  const persist =
+    outcome === ToolConfirmationOutcome.ProceedAlwaysAndSave ||
+    (outcome === ToolConfirmationOutcome.ProceedAlways &&
+      config.getAutoAddPolicy());
 
   // If "Always allow all tools from this server", use the wildcard pattern
   if (outcome === ToolConfirmationOutcome.ProceedAlwaysServer) {
